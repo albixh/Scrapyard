@@ -11,6 +11,7 @@
 #include "Animation/AnimCompressionTypes.h"
 #include "Animation/AnimCurveCompressionSettings.h"
 #include "Animation/AnimBoneCompressionSettings.h"
+#include "EditorFramework/AssetImportData.h"
 
 UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 {
@@ -19,12 +20,13 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 	FString srcPackageDir = FPackageName::GetLongPackagePath(srcPackagePath);
 	FString srcPackageName = FPackageName::GetShortName(srcPackagePath);
 	FString srcObjectName = FPackageName::ObjectPathToObjectName(srcAsset->GetPathName());
-	FString dstPackagePath = srcPackageDir + "/tmp/" + srcPackageName;
+
+	FString dstPackagePath = srcPackageDir + "/TEMP/" + srcPackageName;
 	FString dstObjectName = srcObjectName;
 
-	UPackage* package = CreatePackage(NULL, *dstPackagePath);
-	if (package == nullptr)
-		return nullptr;
+	UPackage* package = CreatePackage(*dstPackagePath);
+
+	srcAsset->AssetImportData = nullptr;// NewObject<UAssetImportData>(srcAsset, TEXT("AssetImportData"));
 
 	UAnimSequence* dstAnimationSequence = DuplicateObject<UAnimSequence>(srcAsset, package, *srcAsset->GetName());
 
@@ -37,6 +39,9 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 	dstAnimationSequence->RemoveAllTracks();
 	dstAnimationSequence->RawCurveData.FloatCurves.Empty();
 	dstAnimationSequence->Notifies.Empty();
+
+	if (srcAsset->AdditiveAnimType != EAdditiveAnimationType::AAT_None) //@TODO: handle additive anims
+		return package;
 
 	// Copy raw animation tracks
 	const TArray<FName>& trackNames = srcAsset->GetAnimationTrackNames();
@@ -100,8 +105,6 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 
 		dstAnimationSequence->RawCurveData.FloatCurves.Add(floatCurve);
 	}
-
-	dstAnimationSequence->CompressRawAnimData();
 
 	// Copy animation notify tracks and handle external references
 	const TArray<FAnimNotifyTrack>& srcNotifyTracks = srcAsset->AnimNotifyTracks;
@@ -209,7 +212,8 @@ void FUncooker::UncookAssets(TArray<UObject*> Objects)
 
 		if (dstPackage != nullptr)
 		{
-			FAssetRegistryModule::AssetCreated(dstPackage);
+			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+			AssetRegistryModule.AssetCreated(dstPackage);
 			dstPackage->MarkPackageDirty();
 
 			FString UncookedPackageFileName = FPackageName::LongPackageNameToFilename(dstPackage->GetName(), FPackageName::GetAssetPackageExtension());
@@ -221,17 +225,18 @@ void FUncooker::UncookAssets(TArray<UObject*> Objects)
 				FString OriginalPackageFileName = FPackageName::LongPackageNameToFilename(asset->GetOutermost()->GetName(), FPackageName::GetAssetPackageExtension());
 				asset->MarkPendingKill();
 				GEngine->ForceGarbageCollection(true);
-				FAssetRegistryModule::AssetDeleted(asset);
+				AssetRegistryModule.AssetDeleted(asset);
 
-				// Move the uncooked asset to the original location of the cooked asset
 				if (IFileManager::Get().Move(*OriginalPackageFileName, *UncookedPackageFileName))
 				{
-					UE_LOG(LogTemp, Log, TEXT("Moved uncooked asset to original location: %s"), *OriginalPackageFileName);
+					UE_LOG(LogTemp, Log, TEXT("Successfully moved uncooked asset to: %s"), *OriginalPackageFileName);
 				}
 				else
 				{
-					UE_LOG(LogTemp, Error, TEXT("Failed to move uncooked asset to original location: %s"), *OriginalPackageFileName);
+					UE_LOG(LogTemp, Error, TEXT("Failed to move uncooked asset to: %s"), *OriginalPackageFileName);
 				}
+
+				AssetRegistryModule.Get().AssetRenamed(dstPackage, *dstPackage->GetPathName());
 			}
 			else
 			{
