@@ -37,8 +37,6 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 	dstAnimationSequence->CompressedData.CompressedByteStream = srcAsset->CompressedData.CompressedByteStream;
 
 	dstAnimationSequence->RemoveAllTracks();
-	dstAnimationSequence->RawCurveData.FloatCurves.Empty();
-	dstAnimationSequence->Notifies.Empty();
 
 	if (srcAsset->AdditiveAnimType != EAdditiveAnimationType::AAT_None) //@TODO: handle additive anims
 		return package;
@@ -57,7 +55,7 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 			FTransform xform;
 			srcAsset->GetBoneTransform(xform, i, time, false);
 
-			// Adjust root bone because of flipped
+			// Just adjust root bone for now
 			// @TODO: Actually fix flipped axis
 			if (i == 0)
 			{
@@ -88,7 +86,7 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 		dstAnimationSequence->AddNewRawTrack(trackNames[i], &rawAnimTrack);
 	}
 
-
+	dstAnimationSequence->RawCurveData.FloatCurves.Empty();
 	// Copy animation curves
 	const TArray<FSmartName>& curveNames = srcAsset->GetCompressedCurveNames();
 	for (int i = 0; i < curveNames.Num(); ++i)
@@ -106,32 +104,26 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 		dstAnimationSequence->RawCurveData.FloatCurves.Add(floatCurve);
 	}
 
-	// Copy animation notify tracks and handle external references
-	const TArray<FAnimNotifyTrack>& srcNotifyTracks = srcAsset->AnimNotifyTracks;
-	TArray<FAnimNotifyTrack>& dstNotifyTracks = dstAnimationSequence->AnimNotifyTracks;
+	dstAnimationSequence->Notifies.Empty();
+	dstAnimationSequence->AnimNotifyTracks.Reset();
 
-	dstNotifyTracks.Reset();
-
-	// If the destination has fewer tracks, add the missing tracks
-	for (int32 i = dstNotifyTracks.Num(); i < srcNotifyTracks.Num(); ++i)
+	for (int32 i = dstAnimationSequence->AnimNotifyTracks.Num(); i < srcAsset->AnimNotifyTracks.Num(); ++i)
 	{
 		// Create a new notify track for the destination asset
 		FAnimNotifyTrack NewTrack;
-		NewTrack.TrackName = srcNotifyTracks[i].TrackName;
-		NewTrack.TrackColor = srcNotifyTracks[i].TrackColor;
+		NewTrack.TrackName = srcAsset->AnimNotifyTracks[i].TrackName;
+		NewTrack.TrackColor = srcAsset->AnimNotifyTracks[i].TrackColor;
 		//NewTrack.Notifies = srcNotifyTracks[i].Notifies;
-		dstNotifyTracks.Add(NewTrack);
+		dstAnimationSequence->AnimNotifyTracks.Add(NewTrack);
 	}
 
-	const TArray<FAnimNotifyEvent>& srcNotifies = srcAsset->Notifies;
-	TArray<FAnimNotifyEvent>& dstNotifies = dstAnimationSequence->Notifies;
-
-	for (const FAnimNotifyEvent& srcNotify : srcNotifies)
+	for (const FAnimNotifyEvent& srcNotify : srcAsset->Notifies)
 	{
 		// Create a new instance of FAnimNotifyEvent
 		FAnimNotifyEvent dstNotify;
 
 		// Manually copy values 
+		dstNotify.Link(dstAnimationSequence, 0.05f);
 		dstNotify.NotifyName = srcNotify.NotifyName;
 		dstNotify.SetTime(srcNotify.GetTime());
 		dstNotify.Duration = srcNotify.Duration;
@@ -146,19 +138,20 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 		dstNotify.TrackIndex = srcNotify.TrackIndex;
 		dstNotify.bConvertedFromBranchingPoint = srcNotify.bConvertedFromBranchingPoint;
 
-		dstNotify.EndLink.SetTime(srcNotify.EndLink.GetTime());
-		dstNotify.EndLink.LinkSequence(dstAnimationSequence, dstAnimationSequence->SequenceLength);
-		dstNotify.EndLink.ChangeSlotIndex(srcNotify.EndLink.GetSlotIndex());
-
-		dstNotify.EndLink.SetSegmentIndex(srcNotify.EndLink.GetSegmentIndex());
-		dstNotify.EndLink.ChangeLinkMethod(srcNotify.EndLink.GetLinkMethod());
-
 		// Handle NotifyStateClass
 		if (srcNotify.NotifyStateClass)
 		{
 			if (UAnimNotifyState* NotifyState = Cast<UAnimNotifyState>(srcNotify.NotifyStateClass))
 			{
-				UAnimNotifyState* NewNotifyState = NewObject<UAnimNotifyState>(package, NotifyState->GetClass());
+				dstNotify.EndLink.Link(dstAnimationSequence, dstAnimationSequence->SequenceLength);
+				dstNotify.EndLink.SetTime(srcNotify.EndLink.GetTime());
+				//dstNotify.EndLink.LinkSequence(dstAnimationSequence, dstAnimationSequence->SequenceLength);
+				dstNotify.EndLink.ChangeSlotIndex(srcNotify.EndLink.GetSlotIndex());
+
+				dstNotify.EndLink.SetSegmentIndex(srcNotify.EndLink.GetSegmentIndex());
+				dstNotify.EndLink.ChangeLinkMethod(srcNotify.EndLink.GetLinkMethod());
+
+				UAnimNotifyState* NewNotifyState = NewObject<UAnimNotifyState>(dstAnimationSequence, NotifyState->GetClass());
 
 				// Manually copy all properties from old NotifyState to new one
 				for (TFieldIterator<FProperty> PropIt(NotifyState->GetClass()); PropIt; ++PropIt)
@@ -177,7 +170,7 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 		{
 			if (UAnimNotify* Notify = Cast<UAnimNotify>(srcNotify.Notify))
 			{
-				UAnimNotify* NewNotify = NewObject<UAnimNotify>(package, Notify->GetClass());
+				UAnimNotify* NewNotify = NewObject<UAnimNotify>(dstAnimationSequence, Notify->GetClass());
 
 				// Manually copy all properties from old Notify to new one
 				for (TFieldIterator<FProperty> PropIt(Notify->GetClass()); PropIt; ++PropIt)
@@ -190,9 +183,8 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 				dstNotify.Notify = NewNotify;
 			}
 		}
-		dstNotifies.Add(dstNotify);
+		dstAnimationSequence->Notifies.Add(dstNotify);
 	}
-
 	dstAnimationSequence->PostProcessSequence();
 
 	return package;
@@ -200,6 +192,7 @@ UPackage* FUncooker::UncookAnimSequence(UAnimSequence* srcAsset)
 
 void FUncooker::UncookAssets(TArray<UObject*> Objects)
 {
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	for (UObject* asset : Objects)
 	{
 		UPackage* srcPackage = asset->GetOutermost();
@@ -212,7 +205,6 @@ void FUncooker::UncookAssets(TArray<UObject*> Objects)
 
 		if (dstPackage != nullptr)
 		{
-			FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 			AssetRegistryModule.AssetCreated(dstPackage);
 			dstPackage->MarkPackageDirty();
 
@@ -227,6 +219,8 @@ void FUncooker::UncookAssets(TArray<UObject*> Objects)
 				GEngine->ForceGarbageCollection(true);
 				AssetRegistryModule.AssetDeleted(asset);
 
+				FString oldPath = FPaths::GetPath(UncookedPackageFileName);
+
 				if (IFileManager::Get().Move(*OriginalPackageFileName, *UncookedPackageFileName))
 				{
 					UE_LOG(LogTemp, Log, TEXT("Successfully moved uncooked asset to: %s"), *OriginalPackageFileName);
@@ -235,7 +229,8 @@ void FUncooker::UncookAssets(TArray<UObject*> Objects)
 				{
 					UE_LOG(LogTemp, Error, TEXT("Failed to move uncooked asset to: %s"), *OriginalPackageFileName);
 				}
-
+				IFileManager::Get().DeleteDirectory(*oldPath, false, true);
+				AssetRegistryModule.Get().RemovePath(oldPath);
 				AssetRegistryModule.Get().AssetRenamed(dstPackage, *dstPackage->GetPathName());
 			}
 			else
@@ -243,7 +238,10 @@ void FUncooker::UncookAssets(TArray<UObject*> Objects)
 				UE_LOG(LogTemp, Error, TEXT("Failed to save uncooked package: %s"), *UncookedPackageFileName);
 			}
 		}
-	}   
+	}
+
+	AssetRegistryModule.Get().ScanModifiedAssetFiles(TArray<FString>());
+
 	FText Message = FText::FromString(TEXT("Uncooking finished."));
 	FMessageDialog::Open(EAppMsgType::Ok, Message);
 }
